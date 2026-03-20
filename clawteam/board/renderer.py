@@ -50,7 +50,7 @@ class BoardRenderer:
         """Render a live-refreshing team board. Ctrl+C to stop."""
         running = True
         notify_counter = 0
-        NOTIFY_INTERVAL = 5  # auto_notify every N refresh cycles
+        notify_interval = 5  # auto_notify every N refresh cycles
 
         def _handle_signal(signum, frame):
             nonlocal running
@@ -75,7 +75,7 @@ class BoardRenderer:
 
                     # Periodically run conflict auto-notification
                     notify_counter += 1
-                    if notify_counter >= NOTIFY_INTERVAL:
+                    if notify_counter >= notify_interval:
                         notify_counter = 0
                         try:
                             from clawteam.team.mailbox import MailboxManager

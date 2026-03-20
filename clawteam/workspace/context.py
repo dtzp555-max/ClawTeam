@@ -2,16 +2,35 @@
 
 from __future__ import annotations
 
-import re
-from datetime import datetime, timezone
+import json
 from pathlib import Path
 
+from clawteam.team.models import get_data_dir
 from clawteam.workspace import git
 from clawteam.workspace.manager import WorkspaceManager, _load_registry
 
 
-def _ws_manager(repo: str | None = None) -> WorkspaceManager:
-    path = Path(repo) if repo else None
+def _registry_repo_root(team_name: str) -> str | None:
+    path = get_data_dir() / "workspaces" / team_name / "workspace-registry.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    repo_root = data.get("repo_root")
+    if not isinstance(repo_root, str) or not repo_root:
+        return None
+    return repo_root
+
+
+def _resolve_repo_path(team_name: str, repo: str | None = None) -> str | None:
+    return repo or _registry_repo_root(team_name)
+
+
+def _ws_manager(team_name: str, repo: str | None = None) -> WorkspaceManager:
+    resolved_repo = _resolve_repo_path(team_name, repo)
+    path = Path(resolved_repo) if resolved_repo else None
     mgr = WorkspaceManager.try_create(path)
     if mgr is None:
         raise RuntimeError("Not inside a git repository")
@@ -36,7 +55,7 @@ def agent_diff(team_name: str, agent_name: str, repo: str | None = None) -> dict
 
     Keys: files_changed, insertions, deletions, diff_stat, commit_count, summary
     """
-    mgr = _ws_manager(repo)
+    mgr = _ws_manager(team_name, repo)
     branch = _agent_branch(team_name, agent_name)
     base = _base_branch(team_name, agent_name, mgr)
     root = mgr.repo_root
@@ -99,7 +118,7 @@ def agent_diff(team_name: str, agent_name: str, repo: str | None = None) -> dict
 
 def file_owners(team_name: str, repo: str | None = None) -> dict[str, list[str]]:
     """Map each modified file to the list of agents that touched it."""
-    mgr = _ws_manager(repo)
+    mgr = _ws_manager(team_name, repo)
     registry = _load_registry(team_name, str(mgr.repo_root))
     owners: dict[str, list[str]] = {}
 
@@ -132,7 +151,7 @@ def cross_branch_log(
     team_name: str, limit: int = 50, repo: str | None = None,
 ) -> list[dict]:
     """Unified commit log across all agent branches, newest first."""
-    mgr = _ws_manager(repo)
+    mgr = _ws_manager(team_name, repo)
     registry = _load_registry(team_name, str(mgr.repo_root))
     entries: list[dict] = []
 
@@ -211,9 +230,6 @@ def inject_context(
     - File overlap warnings
     - Upstream dependency diffs (if task has blocked_by)
     """
-    mgr = _ws_manager(repo)
-    registry = _load_registry(team_name, str(mgr.repo_root))
-
     # Files the target agent is modifying
     target_diff = agent_diff(team_name, target_agent, repo)
     target_files = set(target_diff["files_changed"])

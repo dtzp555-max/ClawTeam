@@ -12,13 +12,14 @@ Gource custom log format: timestamp|username|type|path
 
 from __future__ import annotations
 
-import subprocess
 import shutil
+import subprocess
+import time
 from datetime import datetime, timezone
+from io import TextIOBase
 from pathlib import Path
 
 from clawteam.board.collector import BoardCollector
-
 
 # ---------------------------------------------------------------------------
 # Color mapping for agents
@@ -43,9 +44,24 @@ def _agent_color(index: int) -> str:
     return AGENT_COLORS[index % len(AGENT_COLORS)]
 
 
+def _virtual_path(*parts: str) -> str:
+    components: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        for component in str(part).replace("\\", "/").split("/"):
+            if not component or component == ".":
+                continue
+            if components and components[-1] == component:
+                continue
+            components.append(component)
+    return "/" + "/".join(components)
+
+
 # ---------------------------------------------------------------------------
 # ClawTeam event log → Gource custom log
 # ---------------------------------------------------------------------------
+
 
 def _parse_iso(ts: str) -> int:
     """Parse ISO timestamp string to unix timestamp."""
@@ -73,14 +89,19 @@ def generate_event_log(team_name: str) -> list[str]:
         return []
 
     lines: list[str] = []
+    inbox_aliases: dict[str, str] = {}
 
     # Member joins as additions
     for member in data.get("members", []):
         name = member["name"]
+        inbox_aliases[name] = name
+        user = member.get("user", "")
+        if user:
+            inbox_aliases[f"{user}_{name}"] = name
         joined = member.get("joinedAt", "")
         if joined:
             ts = _parse_iso(joined)
-            lines.append(f"{ts}|{name}|A|/team/{name}")
+            lines.append(f"{ts}|{name}|A|{_virtual_path('team', name)}")
 
     # Tasks as file operations
     for status, tasks in data.get("tasks", {}).items():
@@ -94,32 +115,37 @@ def generate_event_log(team_name: str) -> list[str]:
             if created:
                 ts = _parse_iso(created)
                 creator = owner or "system"
-                lines.append(f"{ts}|{creator}|A|/tasks/pending/{task_id}_{subject}")
+                lines.append(f"{ts}|{creator}|A|{_virtual_path('tasks', 'pending', f'{task_id}_{subject}')}")
 
             if updated and status != "pending":
                 ts = _parse_iso(updated)
                 gource_type = "M" if status in ("in_progress", "blocked") else "A"
                 agent = owner or "system"
-                lines.append(f"{ts}|{agent}|{gource_type}|/tasks/{status}/{task_id}_{subject}")
+                lines.append(
+                    f"{ts}|{agent}|{gource_type}|{_virtual_path('tasks', status, f'{task_id}_{subject}')}"
+                )
 
     # Messages as modifications
     for msg in data.get("messages", []):
-        from_agent = msg.get("fromAgent", "unknown")
-        to = msg.get("to", "broadcast")
+        raw_from = msg.get("from") or msg.get("fromAgent") or "unknown"
+        from_agent = inbox_aliases.get(raw_from, raw_from)
+        raw_to = msg.get("to") or "broadcast"
+        to = inbox_aliases.get(raw_to, raw_to)
         ts_str = msg.get("timestamp", "")
         msg_type = msg.get("type", "message")
         if ts_str:
             ts = _parse_iso(ts_str)
-            lines.append(f"{ts}|{from_agent}|M|/messages/{from_agent}/{to}/{msg_type}")
+            lines.append(f"{ts}|{from_agent}|M|{_virtual_path('messages', from_agent, to, msg_type)}")
 
     # Sort by timestamp
-    lines.sort(key=lambda l: int(l.split("|")[0]))
+    lines.sort(key=lambda line: int(line.split("|")[0]))
     return lines
 
 
 # ---------------------------------------------------------------------------
 # Git log → Gource log (via context layer)
 # ---------------------------------------------------------------------------
+
 
 def generate_git_log(team_name: str, repo_path: str | None = None) -> list[str]:
     """Combine git logs from all agent branches into unified Gource log.
@@ -148,7 +174,7 @@ def generate_git_log(team_name: str, repo_path: str | None = None) -> list[str]:
         for fpath in entry.get("files", []):
             # Classify as M (modify) by default; context layer doesn't
             # distinguish A/M/D per-file, so use "M" for all.
-            lines.append(f"{ts}|{agent}|M|/{agent}/{fpath}")
+            lines.append(f"{ts}|{agent}|M|{_virtual_path(agent, fpath)}")
 
     # Enrich with file-owner coloring: mark multi-owner files
     try:
@@ -158,12 +184,12 @@ def generate_git_log(team_name: str, repo_path: str | None = None) -> list[str]:
             if len(agents) > 1:
                 # Add a synthetic entry so Gource shows shared files
                 for agent in agents:
-                    lines.append(f"{now_ts}|{agent}|M|/shared/{fname}")
+                    lines.append(f"{now_ts}|{agent}|M|{_virtual_path('shared', fname)}")
     except Exception:
         pass
 
     # Sort by timestamp
-    lines.sort(key=lambda l: int(l.split("|")[0]))
+    lines.sort(key=lambda line: int(line.split("|")[0]))
     return lines
 
 
@@ -172,13 +198,71 @@ def generate_combined_log(team_name: str, repo_path: str | None = None) -> list[
     events = generate_event_log(team_name)
     git_lines = generate_git_log(team_name, repo_path)
     combined = events + git_lines
-    combined.sort(key=lambda l: int(l.split("|")[0]))
+    combined.sort(key=lambda line: int(line.split("|")[0]))
     return combined
+
+
+def collect_live_log_lines(
+    seen_lines: set[str],
+    team_name: str,
+    *,
+    combine_worktrees: bool = True,
+    repo_path: str | None = None,
+) -> list[str]:
+    """Return newly observed log lines for live streaming.
+
+    This is intentionally side-effect free with respect to ClawTeam state.
+    It only polls current event/git views and de-duplicates against a local
+    in-memory cursor owned by the `board gource --live` command.
+    """
+    all_lines = (
+        generate_combined_log(team_name, repo_path)
+        if combine_worktrees
+        else generate_event_log(team_name)
+    )
+    new_lines = [line for line in all_lines if line not in seen_lines]
+    new_lines.sort(key=lambda line: int(line.split("|")[0]))
+    return new_lines
+
+
+def append_log_lines(stream: TextIOBase, lines: list[str]) -> None:
+    """Append custom-log lines to a live Gource input stream."""
+    if not lines:
+        return
+    stream.write("\n".join(lines) + "\n")
+    stream.flush()
+
+
+def stream_gource_live(
+    proc: subprocess.Popen,
+    team_name: str,
+    *,
+    combine_worktrees: bool = True,
+    repo_path: str | None = None,
+    poll_interval: float = 2.0,
+) -> None:
+    """Feed Gource custom log lines to a running process via STDIN."""
+    if proc.stdin is None:
+        raise RuntimeError("Live gource process missing stdin pipe")
+
+    seen_lines: set[str] = set()
+    while proc.poll() is None:
+        new_lines = collect_live_log_lines(
+            seen_lines,
+            team_name,
+            combine_worktrees=combine_worktrees,
+            repo_path=repo_path,
+        )
+        if new_lines:
+            append_log_lines(proc.stdin, new_lines)
+            seen_lines.update(new_lines)
+        time.sleep(poll_interval)
 
 
 # ---------------------------------------------------------------------------
 # Gource user color config generation
 # ---------------------------------------------------------------------------
+
 
 def generate_user_colors(team_name: str) -> str:
     """Generate Gource --user-image-dir compatible color config.
@@ -205,9 +289,11 @@ def generate_user_colors(team_name: str) -> str:
 # Launch Gource
 # ---------------------------------------------------------------------------
 
+
 def find_gource() -> str | None:
     """Find gource binary. Returns path or None."""
     from clawteam.config import load_config
+
     cfg = load_config()
     custom_path = getattr(cfg, "gource_path", "")
     if custom_path and Path(custom_path).is_file():
@@ -216,12 +302,13 @@ def find_gource() -> str | None:
 
 
 def launch_gource(
-    log_file: Path,
+    log_file: Path | None = None,
     title: str = "",
     resolution: str = "",
     seconds_per_day: float = 0,
     extra_args: list[str] | None = None,
     export_path: str | None = None,
+    live_stream: bool = False,
 ) -> subprocess.Popen | None:
     """Launch Gource with the given custom log file.
 
@@ -234,6 +321,7 @@ def launch_gource(
 
     # Load config defaults
     from clawteam.config import load_config
+
     cfg = load_config()
     if not resolution:
         resolution = getattr(cfg, "gource_resolution", "1280x720")
@@ -242,15 +330,22 @@ def launch_gource(
 
     cmd = [
         gource_bin,
-        str(log_file),
-        "--log-format", "custom",
-        "--seconds-per-day", str(seconds_per_day),
-        "--auto-skip-seconds", "0.5",
-        "--file-idle-time", "0",
-        "--max-files", "0",
+        "-" if live_stream else str(log_file),
+        "--log-format",
+        "custom",
+        "--seconds-per-day",
+        str(seconds_per_day),
+        "--auto-skip-seconds",
+        "0.5",
+        "--file-idle-time",
+        "0",
+        "--max-files",
+        "0",
         "--highlight-users",
         "--multi-sampling",
     ]
+    if live_stream:
+        cmd.append("--realtime")
 
     if resolution:
         parts = resolution.split("x")
@@ -279,14 +374,22 @@ def launch_gource(
         ffmpeg_cmd = [
             ffmpeg_bin,
             "-y",  # overwrite
-            "-r", "60",
-            "-f", "image2pipe",
-            "-vcodec", "ppm",
-            "-i", "-",
-            "-vcodec", "libx264",
-            "-preset", "medium",
-            "-pix_fmt", "yuv420p",
-            "-crf", "18",
+            "-r",
+            "60",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "ppm",
+            "-i",
+            "-",
+            "-vcodec",
+            "libx264",
+            "-preset",
+            "medium",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "18",
             export_path,
         ]
 
@@ -299,4 +402,7 @@ def launch_gource(
             gource_proc.stdout.close()
         return ffmpeg_proc
     else:
-        return subprocess.Popen(cmd)
+        popen_kwargs: dict[str, object] = {}
+        if live_stream:
+            popen_kwargs.update({"stdin": subprocess.PIPE, "text": True})
+        return subprocess.Popen(cmd, **popen_kwargs)
