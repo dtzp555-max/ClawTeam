@@ -27,6 +27,19 @@ In practice:
 2. keep OpenClaw-specific behavior in a narrow integration layer
 3. prefer cherry-picking or replaying downstream-only changes instead of merging legacy downstream history wholesale
 
+## Acknowledgements
+
+The OpenClaw integration work in this fork was **directly inspired by and partially derived from** [win4r/ClawTeam-OpenClaw](https://github.com/win4r/ClawTeam-OpenClaw). Their fork was the first to adapt ClawTeam for OpenClaw environments, covering areas such as:
+
+- OpenClaw as a first-class spawn target
+- Install scripts and exec approval bootstrapping
+- Session isolation for OpenClaw agents
+- Skill documentation for OpenClaw workflows
+
+We cherry-picked and reviewed their downstream delta as the starting point for our own integration layer. Where their approach and ours diverge (e.g., we restructured session isolation into the canonical adapter pattern rather than patching engine files directly), we rewrote the implementation — but the direction and many of the ideas originated from their work.
+
+Thank you to the win4r team for blazing the trail.
+
 ## Reference docs
 
 For the current fork policy and delta inventory, see:
