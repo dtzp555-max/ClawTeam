@@ -85,6 +85,7 @@ def build_agent_prompt(
     workspace_dir: str = "",
     workspace_branch: str = "",
     repo_path: str | None = None,
+    data_dir: str = "",
 ) -> str:
     """Build agent prompt: identity + task + context + coordination."""
     lines = [
