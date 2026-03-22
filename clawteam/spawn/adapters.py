@@ -55,6 +55,12 @@ class NativeCliAdapter:
                 final_command.extend(["-w", cwd])
             if prompt:
                 final_command.extend(["-m", prompt])
+        elif is_openclaw_command(normalized_command):
+            # OpenClaw uses subcommands: 'tui' (interactive) or 'agent' (non-interactive)
+            if "tui" not in final_command and "agent" not in final_command:
+                final_command.insert(1, "tui" if interactive else "agent")
+            if prompt:
+                final_command.extend(["--message", prompt])
         elif prompt:
             if interactive and is_claude_command(normalized_command):
                 post_launch_prompt = prompt
@@ -112,6 +118,11 @@ def is_opencode_command(command: list[str]) -> bool:
     return command_basename(command) == "opencode"
 
 
+def is_openclaw_command(command: list[str]) -> bool:
+    """Check if the command is an OpenClaw CLI invocation."""
+    return command_basename(command) == "openclaw"
+
+
 def is_interactive_cli(command: list[str]) -> bool:
     """Check if the command is a known interactive AI coding CLI."""
     return (
@@ -122,6 +133,7 @@ def is_interactive_cli(command: list[str]) -> bool:
         or is_kimi_command(command)
         or is_qwen_command(command)
         or is_opencode_command(command)
+        or is_openclaw_command(command)
     )
 
 

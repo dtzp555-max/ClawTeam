@@ -16,6 +16,7 @@ from clawteam.spawn.adapters import (
     is_gemini_command,
     is_kimi_command,
     is_nanobot_command,
+    is_openclaw_command,
     is_opencode_command,
     is_qwen_command,
 )
@@ -52,6 +53,8 @@ class TmuxBackend(SpawnBackend):
 
         session_name = f"clawteam-{team_name}"
         clawteam_bin = resolve_clawteam_executable()
+        from clawteam.team.models import get_data_dir
+
         env_vars = os.environ.copy()
         env_vars.update({
             "CLAWTEAM_AGENT_ID": agent_id,
@@ -60,6 +63,9 @@ class TmuxBackend(SpawnBackend):
             "CLAWTEAM_TEAM_NAME": team_name,
             "CLAWTEAM_AGENT_LEADER": "0",
         })
+        # Propagate resolved data dir so spawned agents find the right
+        # task/inbox storage even when the leader resolved it via config.
+        env_vars.setdefault("CLAWTEAM_DATA_DIR", str(get_data_dir()))
         if cwd:
             env_vars["CLAWTEAM_WORKSPACE_DIR"] = cwd
         # Inject context awareness flags
@@ -81,6 +87,15 @@ class TmuxBackend(SpawnBackend):
         validation_command = normalized_command
         final_command = list(prepared.final_command)
         post_launch_prompt = prepared.post_launch_prompt
+
+        # Isolate OpenClaw agents in per-agent sessions
+        if is_openclaw_command(normalized_command):
+            session_key = f"clawteam-{team_name}-{agent_name}"
+            # tui mode uses --session; agent mode uses --session-id
+            if "tui" in final_command:
+                final_command.extend(["--session", session_key])
+            elif "agent" in final_command:
+                final_command.extend(["--session-id", session_key])
 
         command_error = validate_spawn_command(validation_command, path=env_vars["PATH"], cwd=cwd)
         if command_error:
